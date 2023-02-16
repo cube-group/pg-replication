@@ -2,8 +2,8 @@
 golang postgres replication logical slot analyse
 
 ### postgres.conf
-wal_level = logical
-max_replication_slots = 10
+* wal_level = logical
+* max_replication_slots = 10
 
 ### run demo
 ```go
