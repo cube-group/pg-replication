@@ -1,12 +1,3 @@
-# pgx-replication-listen
-golang postgres replication logical slot analyse
-
-### postgres.conf
-wal_level = logical
-max_replication_slots = 10
-
-### run demo
-```go
 package main
 
 import (
@@ -48,5 +39,3 @@ func handle(msg core.ReplicationMessage) {
 		log.Printf("[%v.%v] (%v) %+v", msg.Namespace, msg.Table, msg.MessageType, msg.Body)
 	}
 }
-
-```
