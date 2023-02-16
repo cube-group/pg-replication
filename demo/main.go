@@ -13,12 +13,19 @@ var syncer *core.ReplicationSyncer
 
 func main() {
 	syncer = core.NewReplicationSyncer(
+		//pgx.ConnConfig{
+		//	Host:     "127.0.0.1",
+		//	Port:     4321,
+		//	Database: "default",
+		//	User:     "postgres",
+		//	Password: "",
+		//},
 		pgx.ConnConfig{
-			Host:     "127.0.0.1",
-			Port:     4321,
-			Database: "default",
+			Host:     "192.168.4.157",
+			Port:     30433,
+			Database: "web",
 			User:     "postgres",
-			Password: "",
+			Password: "default",
 		},
 		handle,
 	)

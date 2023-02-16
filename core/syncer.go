@@ -142,14 +142,17 @@ func (t *ReplicationSyncer) createPublication(replicationName string, tables []s
 		return err
 	}
 	// publication exist check
-	rows := conn.QueryRow("SELECT * FROM pg_publication WHERE pubname=?", replicationName)
-	if rows != nil {
-		var i interface{}
-		if rows.Scan(&i) != nil {
-			t.log("publication: ", replicationName, " has existed")
-			return nil
-		}
+	rows, err := conn.Exec(fmt.Sprintf("SELECT oid FROM pg_publication WHERE pubname='%s'", replicationName))
+	if err != nil {
+		return err
 	}
+	if rows.RowsAffected() > 0 {
+		t.log("publication: ", replicationName, " has existed")
+		return nil
+	}else{
+		t.log("publication: ", replicationName, " not exist and will be created")
+	}
+
 	var forTables string
 	// create publication
 	if tables == nil || len(tables) == 0 {
