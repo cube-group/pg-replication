@@ -11,7 +11,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/cube-group/pgx-replication-listen/internal/core"
+	"github.com/cube-group/pgx-replication/core"
 	"github.com/jackc/pgx"
 	"io/ioutil"
 	"log"
