@@ -19,14 +19,19 @@ func (rs *RelationSet) Add(r Relation) {
 	rs.relations[r.ID] = r
 }
 
-func (rs *RelationSet) Values(id uint32, row []Tuple) (namespace, table string, values map[string]pgtype.Value, err error) {
+func (rs *RelationSet) Assist(id uint32) (schema, table string) {
+	if rel, ok := rs.relations[id]; ok {
+		return rel.Namespace, rel.Name
+	}
+	return
+}
+
+func (rs *RelationSet) Values(id uint32, row []Tuple) (values map[string]pgtype.Value, err error) {
 	values = map[string]pgtype.Value{}
 	rel, ok := rs.relations[id]
 	if !ok {
-		return "", "", nil, fmt.Errorf("no relation for %d", id)
+		return nil, fmt.Errorf("no relation for %d", id)
 	}
-	namespace = rel.Namespace
-	table = rel.Name
 	// assert same number of row and columns
 	for i, tuple := range row {
 		col := rel.Columns[i]

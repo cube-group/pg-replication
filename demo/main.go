@@ -1,41 +1,42 @@
 package main
 
 import (
-	"fmt"
-	"github.com/cube-group/pgx-replication/core"
+	"context"
+	"github.com/cube-group/pg-replication/core"
+	"github.com/cube-group/pg-replication/core/adapter"
 	"github.com/jackc/pgx"
-	"io/ioutil"
 	"log"
-	"strconv"
 )
 
 var syncer *core.ReplicationSyncer
 
 func main() {
 	syncer = core.NewReplicationSyncer(
-		pgx.ConnConfig{
-			Host:     "127.0.0.1",
-			Port:     4321,
-			Database: "default",
-			User:     "postgres",
-			Password: "",
+		core.ReplicationOption{
+			SlotName: "test",
+			ConnConfig: pgx.ConnConfig{
+				Host:     "192.168.4.157",
+				Port:     30433,
+				Database: "web",
+				User:     "postgres",
+				Password: "default",
+			},
+			Adapter: adapter.NewLsnFileAdapter("."),
+			//Adapter: adapter.NewRedisLsnAdapter(&redis.Options{
+			//	Addr:     "192.168.4.157:30379",
+			//	DB:       0,
+			//	Password: "xx",
+			//	PoolSize: 1,
+			//}),
+			Tables:              []string{"lin"},
+			MonitorUpdateColumn: true,
 		},
 		handle,
 	)
-
-	var wal int64
-	bytes, err := ioutil.ReadFile(".wal")
-	if err == nil {
-		wal, _ = strconv.ParseInt(string(bytes), 0, 64)
-	}
-	log.Fatalf("sync err: %v", syncer.Debug().Start("test_pg_2_ck", []string{"test"}, uint64(wal)))
+	log.Fatalf("sync err: %v", syncer.Debug().Start(context.Background()))
 }
 
-func handle(msg core.ReplicationMessage) {
-	if msg.Wal > 0 { // current wal for startLSN
-		ioutil.WriteFile(".wal", []byte(fmt.Sprintf("%v", msg.Wal)), 0777)
-	}
-	if msg.Namespace != "" {
-		log.Printf("[%v.%v] (%v) %+v", msg.Namespace, msg.Table, msg.MessageType, msg.Body)
-	}
+func handle(msg core.ReplicationMessage) error {
+	log.Printf("[%v.%v] (%v) %+v %+v", msg.SchemaName, msg.TableName, msg.EventType, msg.Columns, msg.Body)
+	return nil
 }
