@@ -180,6 +180,7 @@ type Column struct {
 	Type uint32
 	Mode uint32
 }
+
 type Tuple struct {
 	Flag  int8
 	Value []byte
