@@ -11,6 +11,7 @@ import (
 type EventType int
 
 const (
+	EventType_READY  EventType = 0
 	EventType_INSERT EventType = 1
 	EventType_UPDATE EventType = 2
 	EventType_DELETE EventType = 3

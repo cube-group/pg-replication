@@ -169,6 +169,9 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 		return fmt.Errorf("failed to start replication2: %s", err)
 	}
 
+	//ready notify
+	t.dmlHandler(ReplicationMessage{EventType: EventType_READY})
+
 	statusTimeout := 10 * time.Second
 	waitTimeout := 10 * time.Second
 	tick := time.NewTicker(statusTimeout).C
