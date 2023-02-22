@@ -15,7 +15,6 @@ package main
 import (
 	"context"
 	"github.com/cube-group/pg-replication/core"
-	"github.com/cube-group/pg-replication/core/adapter"
 	"github.com/jackc/pgx"
 	"log"
 )
@@ -33,24 +32,25 @@ func main() {
 				User:     "postgres",
 				Password: "default",
 			},
-			Adapter: adapter.NewLsnFileAdapter("."),
-			//Adapter: adapter.NewRedisLsnAdapter(&redis.Options{
-			//	Addr:     "192.168.4.157:30379",
-			//	DB:       0,
-			//	Password: "xx",
-			//	PoolSize: 1,
-			//}),
-			Tables:              []string{"lin"},
-			MonitorUpdateColumn: true,
+			Tables:              []string{"sync"},
+			MonitorUpdateColumn: true, //update操作是否监听其操作列
 		},
 		handle,
 	)
 	log.Fatalf("sync err: %v", syncer.Debug().Start(context.Background()))
 }
 
-func handle(msg core.ReplicationMessage) error {
-	log.Printf("[%v.%v] (%v) %+v %+v", msg.SchemaName, msg.TableName, msg.EventType, msg.Columns, msg.Body)
-	return nil
+func handle(msg core.ReplicationMessage) core.DMLHandlerStatus {
+	switch msg.EventType {
+	case core.EventType_READY:
+		//TODO READY LISTEN
+		break
+	case core.EventType_INSERT, core.EventType_UPDATE, core.EventType_DELETE:
+		log.Printf("[%v.%v] (%v) %+v %+v", msg.SchemaName, msg.TableName, msg.EventType, msg.Columns, msg.Body)
+	}
+	//return core.DMLHandlerStatusContinue //继续但不记录此次游标
+	return core.DMLHandlerStatusSuccess //继续并记录此次游标
+	//return core.DMLHandlerStatusError    //报错且继续拉取且不记录此次游标
 }
 
 ```
