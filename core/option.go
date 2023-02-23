@@ -29,10 +29,9 @@ type DMLHandlerStatus int
 const (
 	DMLHandlerStatusSuccess  DMLHandlerStatus = 0 //wal lsn游标将会变动
 	DMLHandlerStatusContinue DMLHandlerStatus = 1 //wal lsn游标不会变动
-	DMLHandlerStatusError    DMLHandlerStatus = 2 //wal lsn游标不会变动，且退出
 )
 
-type ReplicationDMLHandler func(msg ReplicationMessage) DMLHandlerStatus
+type ReplicationDMLHandler func(msg ...ReplicationMessage) DMLHandlerStatus
 
 type ReplicationOption struct {
 	ConnConfig          pgx.ConnConfig

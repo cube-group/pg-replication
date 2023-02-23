@@ -10,10 +10,11 @@ import (
 )
 
 type ReplicationSyncer struct {
-	_debug     bool
-	_conn      *pgx.ReplicationConn
-	_flushLsn  uint64
-	_flushMsg  ReplicationMessage
+	_debug    bool
+	_conn     *pgx.ReplicationConn
+	_flushLsn uint64
+	_flushMsg []ReplicationMessage
+
 	option     ReplicationOption
 	dmlHandler ReplicationDMLHandler
 	set        *RelationSet
@@ -61,7 +62,6 @@ func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldR
 			msg.Columns = t.dumpColumns(values, oldValues)
 		}
 	}
-
 	body := make(map[string]interface{}, 0)
 	for name, value := range values {
 		val := value.Get()
@@ -89,36 +89,32 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage) error {
 	if err != nil {
 		return fmt.Errorf("invalid pgoutput message: %s", err)
 	}
+	var m ReplicationMessage
 	switch v := msg.(type) {
 	case Relation:
+		t._flushMsg = make([]ReplicationMessage, 0)
 		t.set.Add(v)
 	case Insert:
-		t._flushMsg, err = t.dump(EventType_INSERT, v.RelationID, v.Row, nil)
-		if err != nil {
-			return err
-		}
+		m, err = t.dump(EventType_INSERT, v.RelationID, v.Row, nil)
 	case Update:
-		t._flushMsg, err = t.dump(EventType_UPDATE, v.RelationID, v.Row, v.OldRow)
-		if err != nil {
-			return err
-		}
+		m, err = t.dump(EventType_UPDATE, v.RelationID, v.Row, v.OldRow)
 	case Delete:
-		t._flushMsg, err = t.dump(EventType_DELETE, v.RelationID, v.Row, nil)
-		if err != nil {
-			return err
-		}
+		m, err = t.dump(EventType_DELETE, v.RelationID, v.Row, nil)
 	case Commit:
-		if t._flushMsg.SchemaName != "" {
-			status := t.dmlHandler(t._flushMsg)
+		if t._flushMsg != nil || len(t._flushMsg) > 0 {
+			status := t.dmlHandler(t._flushMsg...)
+			t._flushMsg = nil
 			if status == DMLHandlerStatusSuccess {
 				t._flushLsn = message.WalStart
-				if err = t.sendStatus(); err != nil {
-					return err
-				}
-			} else if status == DMLHandlerStatusError {
-				t.log("dmlHandler:", status)
+				err = t.sendStatus()
 			}
 		}
+	}
+	if err != nil {
+		return err
+	}
+	if m.SchemaName != "" {
+		t._flushMsg = append(t._flushMsg, m)
 	}
 	return nil
 }
@@ -133,15 +129,9 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 	}
 	defer conn.Close()
 
-	//var lsn uint64
-	//if startLSN, _ := t.option.Adapter.Get(t.option.SlotName); startLSN > 0 {
-	//	t.log("startLSN:", startLSN, pgx.FormatLSN(startLSN))
-	//	lsn = startLSN
-	//}
-	//defer t.option.Adapter.Close()
-	//
 	//system
-	//if res, err := t.result("IDENTIFY_SYSTEM;");err==nil {
+	var lsn uint64
+	//if res, err := t.result("IDENTIFY_SYSTEM;"); err == nil {
 	//	if len(res) > 0 {
 	//		var lsnPos = util.MustString(res[0]["xlogpos"])
 	//		if outputLSN, err := pgx.ParseLSN(lsnPos); err == nil {
@@ -153,19 +143,18 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 	// monitor table column update
 	if t.option.MonitorUpdateColumn {
 		for _, v := range t.option.Tables {
-			if err := t.exec(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
+			if err := t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
 				return err
 			}
 		}
 	}
 	// create publication
 	// 详见：select * from pg_catalog.pg_publication;
-	if err = t.exec(fmt.Sprintf("CREATE PUBLICATION %s FOR %s", t.option.SlotName, t.option.PublicationTables())); err != nil {
+	if err = t.execEx(fmt.Sprintf("CREATE PUBLICATION %s FOR %s", t.option.SlotName, t.option.PublicationTables())); err != nil {
 		return
 	}
 	// start replication slot
-	t._flushLsn, err = t.startReplication()
-	if err != nil {
+	if err = t.startReplication(lsn); err != nil {
 		return
 	}
 	// ready notify
@@ -200,13 +189,8 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 	}
 }
 
-func (t *ReplicationSyncer) exec(sql string) error {
-	conn, err := t.conn()
-	if err != nil {
-		return err
-	}
-	t.log("exec:", sql)
-	_, err = conn.Exec(sql)
+// 执行sql忽略exist
+func (t *ReplicationSyncer) isErrorWithoutExist(err error) error {
 	if err != nil {
 		pgErr, ok := err.(pgx.PgError)
 		if !ok || pgErr.Code != "42710" {
@@ -216,6 +200,18 @@ func (t *ReplicationSyncer) exec(sql string) error {
 	return nil
 }
 
+// 执行sql忽略exist
+func (t *ReplicationSyncer) execEx(sql string) error {
+	conn, err := t.conn()
+	if err != nil {
+		return err
+	}
+	t.log("exec:", sql)
+	_, err = conn.Exec(sql)
+	return t.isErrorWithoutExist(err)
+}
+
+// 执行sql并获取结果
 func (t *ReplicationSyncer) result(sql string) (res []map[string]interface{}, err error) {
 	conn, err := t.conn()
 	if err != nil {
@@ -270,26 +266,27 @@ func (t *ReplicationSyncer) pluginArgs(version, publication string) []string {
 }
 
 // 开启replication slot
-func (t *ReplicationSyncer) startReplication() (lsn uint64, err error) {
+func (t *ReplicationSyncer) startReplication(lsn uint64) (err error) {
 	conn, err := t.conn()
 	if err != nil {
 		return
 	}
-	if err = t.exec(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s", t.option.SlotName, "pgoutput")); err != nil {
+	if err = t.execEx(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s NOEXPORT_SNAPSHOT", t.option.SlotName, "pgoutput")); err != nil {
 		return
 	}
-	err = conn.StartReplication(t.option.SlotName, 0, -1, t.pluginArgs("1", t.option.SlotName)...)
-	if err != nil {
-		err = fmt.Errorf("failed to start replication: %s", err)
+	pluginArguments := t.pluginArgs("1", t.option.SlotName)
+	if err = conn.StartReplication(t.option.SlotName, lsn, -1, pluginArguments...); err != nil {
+		return
 	}
-	return
+	return nil
 }
 
+// 移除复制槽
 func (t *ReplicationSyncer) DropReplication() error {
-	if err := t.exec(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", t.option.SlotName)); err != nil {
+	if err := t.execEx(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", t.option.SlotName)); err != nil {
 		return err
 	}
-	if err := t.exec(fmt.Sprintf("drop publication if exists %s;", t.option.SlotName)); err != nil {
+	if err := t.execEx(fmt.Sprintf("drop publication if exists %s;", t.option.SlotName)); err != nil {
 		return err
 	}
 	return nil
