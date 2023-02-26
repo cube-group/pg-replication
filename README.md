@@ -9,6 +9,7 @@ golang postgres replication logical slot analyse
 * [streaming replication protocol](https://www.postgresql.org/docs/current/logicaldecoding-example.html)
 * [logical replication decoding](https://www.postgresql.org/docs/current/logicaldecoding-example.html)
 * [view-pg-replication-slots](https://www.postgresql.org/docs/14/view-pg-replication-slots.html)
+* [protocol-logicalrep-message-formats](https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html)
 
 ### run demo
 ```go

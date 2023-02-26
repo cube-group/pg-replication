@@ -50,7 +50,11 @@ func (t *ReplicationSyncer) conn() (*pgx.ReplicationConn, error) {
 }
 
 func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldRow []Tuple) (msg ReplicationMessage, err error) {
+	msg.EventType = eventType
 	msg.SchemaName, msg.TableName = t.set.Assist(relation)
+	if row == nil && oldRow == nil {
+		return
+	}
 	values, err := t.set.Values(relation, row)
 	if err != nil {
 		err = fmt.Errorf("error parsing values: %s", err)
@@ -66,7 +70,6 @@ func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldR
 		val := value.Get()
 		body[name] = val
 	}
-	msg.EventType = eventType
 	msg.Body = body
 	return
 }
@@ -99,12 +102,14 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage) error {
 		m, err = t.dump(EventType_UPDATE, v.RelationID, v.Row, v.OldRow)
 	case Delete:
 		m, err = t.dump(EventType_DELETE, v.RelationID, v.Row, nil)
+	case Truncate:
+		m, err = t.dump(EventType_TRUNCATE, v.RelationID, nil, nil)
 	case Commit:
 		if t._flushMsg != nil || len(t._flushMsg) > 0 {
 			status := t.dmlHandler(t._flushMsg...)
 			t._flushMsg = nil
 			if status == DMLHandlerStatusSuccess {
-				err = t.sendStatus(message.WalStart)
+				err = t.sendStatusACK(message.WalStart)
 			}
 		}
 	}
@@ -156,7 +161,7 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 		// 不向master发送reply可能会导致连接EOF
 		if message.ServerHeartbeat != nil {
 			if message.ServerHeartbeat.ReplyRequested == 1 {
-				if err = t.sendStatus(0); err != nil {
+				if err = t.sendStatusACK(0); err != nil {
 					return err
 				}
 			}
@@ -216,7 +221,7 @@ func (t *ReplicationSyncer) result(sql string) (res []map[string]interface{}, er
 
 // 向master发送lsn，即：WAL中使用者已经收到解码数据的最新位置
 // 详见：select * from pg_catalog.pg_replication_slots；结果中的confirmed_flush_lsn
-func (t *ReplicationSyncer) sendStatus(lsn uint64) error {
+func (t *ReplicationSyncer) sendStatusACK(lsn uint64) error {
 	conn, err := t.conn()
 	if err != nil {
 		return err

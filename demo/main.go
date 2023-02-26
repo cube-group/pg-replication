@@ -22,7 +22,7 @@ func main() {
 				Password: "default",
 			},
 			Tables:              []string{"sync"}, //复制槽关心的表，若
-			MonitorUpdateColumn: true, //update操作是否监听其操作列
+			MonitorUpdateColumn: true,             //update操作是否监听其操作列
 		},
 		dmlHandler,
 	)
@@ -35,7 +35,7 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 		case core.EventType_READY:
 			//TODO READY LISTEN
 			log.Println("Ready")
-		case core.EventType_INSERT, core.EventType_UPDATE, core.EventType_DELETE:
+		case core.EventType_INSERT, core.EventType_UPDATE, core.EventType_DELETE, core.EventType_TRUNCATE:
 			log.Printf(
 				"[%v.%v] (%v) %+v %+v",
 				m.SchemaName, //数据库或空间

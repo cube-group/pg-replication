@@ -164,6 +164,11 @@ type Delete struct {
 	Row []Tuple
 }
 
+type Truncate struct {
+	/// ID of the relation corresponding to the ID in the relation message.
+	RelationID uint32
+}
+
 type Origin struct {
 	LSN  uint64
 	Name string
@@ -197,6 +202,7 @@ func (Insert) msg()   {}
 func (Delete) msg()   {}
 func (Commit) msg()   {}
 func (Origin) msg()   {}
+func (Truncate) msg() {}
 func (Type) msg()     {}
 
 // Parse a logical replication message.
@@ -261,6 +267,12 @@ func Parse(src []byte) (Message, error) {
 		dl.Old = d.rowinfo('O')
 		dl.Row = d.tupledata()
 		return dl, nil
+	case 'T':
+		tr := Truncate{}
+		d.uint32()
+		d.int8()
+		tr.RelationID = d.uint32()
+		return tr, nil
 	default:
 		return nil, fmt.Errorf("Unknown message type for %s (%d)", []byte{msgType}, msgType)
 	}
