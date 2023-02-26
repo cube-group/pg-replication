@@ -12,7 +12,6 @@ import (
 type ReplicationSyncer struct {
 	_debug    bool
 	_conn     *pgx.ReplicationConn
-	_flushLsn uint64
 	_flushMsg []ReplicationMessage
 
 	option     ReplicationOption
@@ -105,8 +104,7 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage) error {
 			status := t.dmlHandler(t._flushMsg...)
 			t._flushMsg = nil
 			if status == DMLHandlerStatusSuccess {
-				t._flushLsn = message.WalStart
-				err = t.sendStatus()
+				err = t.sendStatus(message.WalStart)
 			}
 		}
 	}
@@ -124,37 +122,14 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 		return
 	}
 	conn, err := t.conn()
-	if err != nil {
-		return err
-	}
 	defer conn.Close()
-
-	//system
-	var lsn uint64
-	//if res, err := t.result("IDENTIFY_SYSTEM;"); err == nil {
-	//	if len(res) > 0 {
-	//		var lsnPos = util.MustString(res[0]["xlogpos"])
-	//		if outputLSN, err := pgx.ParseLSN(lsnPos); err == nil {
-	//			lsn = outputLSN
-	//			t.log("startLSN:", lsn, lsnPos)
-	//		}
-	//	}
-	//}
-	// monitor table column update
-	if t.option.MonitorUpdateColumn {
-		for _, v := range t.option.Tables {
-			if err := t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
-				return err
-			}
-		}
-	}
-	// create publication
-	// 详见：select * from pg_catalog.pg_publication;
-	if err = t.execEx(fmt.Sprintf("CREATE PUBLICATION %s FOR %s", t.option.SlotName, t.option.PublicationTables())); err != nil {
+	// create replica identity|publication|replication
+	if err = t.CreateReplication(); err != nil {
 		return
 	}
 	// start replication slot
-	if err = t.startReplication(lsn); err != nil {
+	pluginArguments := t.pluginArgs("1", t.option.SlotName)
+	if err = conn.StartReplication(t.option.SlotName, 0, -1, pluginArguments...); err != nil {
 		return
 	}
 	// ready notify
@@ -181,7 +156,7 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 		// 不向master发送reply可能会导致连接EOF
 		if message.ServerHeartbeat != nil {
 			if message.ServerHeartbeat.ReplyRequested == 1 {
-				if err = t.sendStatus(); err != nil {
+				if err = t.sendStatus(0); err != nil {
 					return err
 				}
 			}
@@ -241,8 +216,7 @@ func (t *ReplicationSyncer) result(sql string) (res []map[string]interface{}, er
 
 // 向master发送lsn，即：WAL中使用者已经收到解码数据的最新位置
 // 详见：select * from pg_catalog.pg_replication_slots；结果中的confirmed_flush_lsn
-func (t *ReplicationSyncer) sendStatus() error {
-	lsn := t._flushLsn
+func (t *ReplicationSyncer) sendStatus(lsn uint64) error {
 	conn, err := t.conn()
 	if err != nil {
 		return err
@@ -265,20 +239,28 @@ func (t *ReplicationSyncer) pluginArgs(version, publication string) []string {
 	return []string{fmt.Sprintf(`proto_version '%s'`, version), fmt.Sprintf(`publication_names '%s'`, publication)}
 }
 
-// 开启replication slot
-func (t *ReplicationSyncer) startReplication(lsn uint64) (err error) {
-	conn, err := t.conn()
-	if err != nil {
+// 创建复制槽系列
+func (t *ReplicationSyncer) CreateReplication() (err error) {
+	if err = t.option.valid(); err != nil {
+		return
+	}
+	// monitor table column update
+	if t.option.MonitorUpdateColumn {
+		for _, v := range t.option.Tables {
+			if err = t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
+				return err
+			}
+		}
+	}
+	// create publication
+	// 详见：select * from pg_catalog.pg_publication;
+	if err = t.execEx(fmt.Sprintf("CREATE PUBLICATION %s FOR %s", t.option.SlotName, t.option.PublicationTables())); err != nil {
 		return
 	}
 	if err = t.execEx(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s NOEXPORT_SNAPSHOT", t.option.SlotName, "pgoutput")); err != nil {
 		return
 	}
-	pluginArguments := t.pluginArgs("1", t.option.SlotName)
-	if err = conn.StartReplication(t.option.SlotName, lsn, -1, pluginArguments...); err != nil {
-		return
-	}
-	return nil
+	return
 }
 
 // 移除复制槽
