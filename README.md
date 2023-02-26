@@ -1,17 +1,21 @@
 # pgx-replication-listen
+
 golang postgres replication logical slot analyse
 
 ### postgres.conf
+
 * wal_level = logical
 * max_replication_slots = 10
 
 ### help doc
+
 * [streaming replication protocol](https://www.postgresql.org/docs/current/logicaldecoding-example.html)
 * [logical replication decoding](https://www.postgresql.org/docs/current/logicaldecoding-example.html)
 * [view-pg-replication-slots](https://www.postgresql.org/docs/14/view-pg-replication-slots.html)
 * [protocol-logicalrep-message-formats](https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html)
 
 ### run demo
+
 ```go
 package main
 
@@ -37,7 +41,7 @@ func main() {
 				Password: "default",
 			},
 			Tables:              []string{"sync"}, //复制槽关心的表，若
-			MonitorUpdateColumn: true, //update操作是否监听其操作列
+			MonitorUpdateColumn: true,             //update操作是否监听其操作列
 		},
 		dmlHandler,
 	)
@@ -50,12 +54,12 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 		case core.EventType_READY:
 			//TODO READY LISTEN
 			log.Println("Ready")
-		case core.EventType_INSERT, core.EventType_UPDATE, core.EventType_DELETE:
+		case core.EventType_INSERT, core.EventType_UPDATE, core.EventType_DELETE, core.EventType_TRUNCATE:
 			log.Printf(
 				"[%v.%v] (%v) %+v %+v",
 				m.SchemaName, //数据库或空间
 				m.TableName,  //表名
-				m.EventType,  //DML类型(INSERT/UPDATE/DELETE)
+				m.EventType,  //DML类型(INSERT/UPDATE/DELETE/TRUNCATE)
 				m.Columns,    //updated columns只针对MonitorUpdateColumn=true
 				m.Body,       //完成数据条
 			)
@@ -65,5 +69,6 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 	return core.DMLHandlerStatusSuccess //继续并记录此次游标
 	//return core.DMLHandlerStatusContinue //继续但不记录此次游标，多用于批量处理
 }
+
 
 ```

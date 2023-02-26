@@ -40,7 +40,7 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 				"[%v.%v] (%v) %+v %+v",
 				m.SchemaName, //数据库或空间
 				m.TableName,  //表名
-				m.EventType,  //DML类型(INSERT/UPDATE/DELETE)
+				m.EventType,  //DML类型(INSERT/UPDATE/DELETE/TRUNCATE)
 				m.Columns,    //updated columns只针对MonitorUpdateColumn=true
 				m.Body,       //完成数据条
 			)
