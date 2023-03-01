@@ -32,6 +32,11 @@ func (t *ReplicationSyncer) Debug() *ReplicationSyncer {
 	return t
 }
 
+func (t *ReplicationSyncer) UnDebug() *ReplicationSyncer {
+	t._debug = false
+	return t
+}
+
 func (t *ReplicationSyncer) log(any ...interface{}) {
 	if t._debug {
 		log.Println(any...)
@@ -173,7 +178,9 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 func (t *ReplicationSyncer) isErrorWithoutExist(err error) error {
 	if err != nil {
 		pgErr, ok := err.(pgx.PgError)
-		if !ok || pgErr.Code != "42710" {
+		// 42710 already exist
+		// 42704 no exist
+		if !ok || (pgErr.Code != "42710" && pgErr.Code != "42704") {
 			return err
 		}
 	}
@@ -250,8 +257,8 @@ func (t *ReplicationSyncer) CreateReplication() (err error) {
 		return
 	}
 	// monitor table column update
-	if t.option.MonitorUpdateColumn {
-		for _, v := range t.option.Tables {
+	if t.option.TablesReplicaIdentityFull!=nil {
+		for _, v := range t.option.TablesReplicaIdentityFull {
 			if err = t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
 				return err
 			}

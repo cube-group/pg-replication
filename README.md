@@ -40,11 +40,12 @@ func main() {
 				User:     "postgres",
 				Password: "default",
 			},
-			Tables:              []string{"sync"}, //复制槽关心的表，若
-			MonitorUpdateColumn: true,             //update操作是否监听其操作列
+			Tables:                    []string{"sync*"}, //监听sync开头的所有表
+			TablesReplicaIdentityFull: []string{"sync"},  //需更改复制标识的表，开启后ReplicationMessage中的Columns为操作受影响的列
 		},
 		dmlHandler,
 	)
+	//syncer.DropReplication()
 	log.Fatalf("sync err: %v", syncer.Debug().Start(context.Background()))
 }
 
@@ -69,6 +70,5 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 	return core.DMLHandlerStatusSuccess //继续并记录此次游标
 	//return core.DMLHandlerStatusContinue //继续但不记录此次游标，多用于批量处理
 }
-
 
 ```
