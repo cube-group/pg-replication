@@ -133,6 +133,14 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 	}
 	conn, err := t.conn()
 	defer conn.Close()
+	// monitor table column update
+	if t.option.TablesReplicaIdentityFull!=nil {
+		for _, v := range t.option.TablesReplicaIdentityFull {
+			if err = t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
+				return err
+			}
+		}
+	}
 	// create replica identity|publication|replication
 	if err = t.CreateReplication(); err != nil {
 		return
@@ -255,14 +263,6 @@ func (t *ReplicationSyncer) pluginArgs(version, publication string) []string {
 func (t *ReplicationSyncer) CreateReplication() (err error) {
 	if err = t.option.valid(); err != nil {
 		return
-	}
-	// monitor table column update
-	if t.option.TablesReplicaIdentityFull!=nil {
-		for _, v := range t.option.TablesReplicaIdentityFull {
-			if err = t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
-				return err
-			}
-		}
 	}
 	// create publication
 	// 详见：select * from pg_catalog.pg_publication;
