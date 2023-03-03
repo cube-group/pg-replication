@@ -6,7 +6,27 @@ import (
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
 	"log"
+	"regexp"
+	"strings"
 	"time"
+)
+
+// 表复制标识枚举
+type ReplicaIdentity string
+
+const (
+	// ReplicaIdentityFull
+	// 需要开启replica identity full权限的表
+	// 逻辑复制-更改复制标识
+	// 默认情况下，复制标识就是主键（如果有主键）。
+	// 也可以在复制标识上设置另一个唯一索引（有特定的额外要求）。
+	// 如果表没有合适的键，那么可以设置成复制标识“full”，它表示整个行都成为那个键。
+	// 不过，这样做效率很低，只有在没有其他方案的情况下才应该使用。
+	ReplicaIdentityFull ReplicaIdentity = "FULL"
+	// ReplicaIdentityDefault
+	// 默认按照主键id为复制标识
+	// update时无法得知详细更新column信息
+	ReplicaIdentityDefault ReplicaIdentity = "DEFAULT"
 )
 
 type ReplicationSyncer struct {
@@ -14,17 +34,16 @@ type ReplicationSyncer struct {
 	_conn     *pgx.ReplicationConn
 	_flushMsg []ReplicationMessage
 
-	option     ReplicationOption
-	dmlHandler ReplicationDMLHandler
-	set        *RelationSet
+	name   string
+	config pgx.ConnConfig
+	set    *RelationSet
 }
 
-func NewReplicationSyncer(option ReplicationOption, dmlHandler ReplicationDMLHandler) *ReplicationSyncer {
-	i := new(ReplicationSyncer)
-	i.option = option
-	i.dmlHandler = dmlHandler
-	i.set = NewRelationSet()
-	return i
+func NewReplicationSyncer(name string, config pgx.ConnConfig) *ReplicationSyncer {
+	if !regexp.MustCompile(`[a-z0-9_]{3,64}`).MatchString(name) {
+		log.Fatal("name invalid")
+	}
+	return &ReplicationSyncer{name: name, config: config, set: NewRelationSet()}
 }
 
 func (t *ReplicationSyncer) Debug() *ReplicationSyncer {
@@ -45,7 +64,7 @@ func (t *ReplicationSyncer) log(any ...interface{}) {
 
 func (t *ReplicationSyncer) conn() (*pgx.ReplicationConn, error) {
 	if t._conn == nil {
-		conn, err := pgx.ReplicationConnect(t.option.ConnConfig)
+		conn, err := pgx.ReplicationConnect(t.config)
 		if err != nil {
 			return nil, err
 		}
@@ -91,7 +110,7 @@ func (t *ReplicationSyncer) dumpColumns(values, oldValues map[string]pgtype.Valu
 	return
 }
 
-func (t *ReplicationSyncer) handle(message *pgx.WalMessage) error {
+func (t *ReplicationSyncer) handle(message *pgx.WalMessage, dmlHandler ReplicationDMLHandler) error {
 	msg, err := Parse(message.WalData)
 	if err != nil {
 		return fmt.Errorf("invalid pgoutput message: %s", err)
@@ -111,7 +130,7 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage) error {
 		m, err = t.dump(EventType_TRUNCATE, v.RelationID, nil, nil)
 	case Commit:
 		if t._flushMsg != nil || len(t._flushMsg) > 0 {
-			status := t.dmlHandler(t._flushMsg...)
+			status := dmlHandler(t._flushMsg...)
 			t._flushMsg = nil
 			if status == DMLHandlerStatusSuccess {
 				err = t.sendStatusACK(message.WalStart)
@@ -127,31 +146,20 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage) error {
 	return nil
 }
 
-func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
-	if err = t.option.valid(); err != nil {
-		return
-	}
+func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDMLHandler) (err error) {
 	conn, err := t.conn()
 	defer conn.Close()
-	// monitor table column update
-	if t.option.TablesReplicaIdentityFull!=nil {
-		for _, v := range t.option.TablesReplicaIdentityFull {
-			if err = t.execEx(fmt.Sprintf("ALTER TABLE %s REPLICA IDENTITY FULL;", v)); err != nil {
-				return err
-			}
-		}
-	}
 	// create replica identity|publication|replication
 	if err = t.CreateReplication(); err != nil {
 		return
 	}
 	// start replication slot
-	pluginArguments := t.pluginArgs("1", t.option.SlotName)
-	if err = conn.StartReplication(t.option.SlotName, 0, -1, pluginArguments...); err != nil {
+	pluginArguments := t.pluginArgs("1", t.name)
+	if err = conn.StartReplication(t.name, 0, -1, pluginArguments...); err != nil {
 		return
 	}
 	// ready notify
-	t.dmlHandler(ReplicationMessage{EventType: EventType_READY})
+	dmlHandler(ReplicationMessage{EventType: EventType_READY})
 	// round read
 	waitTimeout := 10 * time.Second
 	for {
@@ -166,7 +174,7 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 			return fmt.Errorf("replication failed: %s", err)
 		}
 		if message.WalMessage != nil {
-			if err = t.handle(message.WalMessage); err != nil {
+			if err = t.handle(message.WalMessage, dmlHandler); err != nil {
 				return err
 			}
 		}
@@ -183,27 +191,24 @@ func (t *ReplicationSyncer) Start(ctx context.Context) (err error) {
 }
 
 // 执行sql忽略exist
-func (t *ReplicationSyncer) isErrorWithoutExist(err error) error {
-	if err != nil {
-		pgErr, ok := err.(pgx.PgError)
-		// 42710 already exist
-		// 42704 no exist
-		if !ok || (pgErr.Code != "42710" && pgErr.Code != "42704") {
-			return err
-		}
-	}
-	return nil
-}
-
-// 执行sql忽略exist
 func (t *ReplicationSyncer) execEx(sql string) error {
 	conn, err := t.conn()
 	if err != nil {
 		return err
 	}
-	t.log("exec:", sql)
-	_, err = conn.Exec(sql)
-	return t.isErrorWithoutExist(err)
+	if _, err = conn.Exec(sql); err != nil {
+		pgErr, ok := err.(pgx.PgError)
+		// 42710 already exist
+		// 42704 no exist
+		if !ok || (pgErr.Code != "42710" && pgErr.Code != "42704") {
+			return err
+		} else {
+			t.log("exec:", sql, "[silent]")
+		}
+	} else {
+		t.log("exec:", sql)
+	}
+	return nil
 }
 
 // 执行sql并获取结果
@@ -259,29 +264,50 @@ func (t *ReplicationSyncer) pluginArgs(version, publication string) []string {
 	return []string{fmt.Sprintf(`proto_version '%s'`, version), fmt.Sprintf(`publication_names '%s'`, publication)}
 }
 
-// 创建复制槽系列
+// CreateReplication 创建逻辑复制槽
+// 锁定起始lsn位置
 func (t *ReplicationSyncer) CreateReplication() (err error) {
-	if err = t.option.valid(); err != nil {
-		return
-	}
 	// create publication
-	// 详见：select * from pg_catalog.pg_publication;
-	if err = t.execEx(fmt.Sprintf("CREATE PUBLICATION %s FOR %s", t.option.SlotName, t.option.PublicationTables())); err != nil {
-		return
-	}
-	if err = t.execEx(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s NOEXPORT_SNAPSHOT", t.option.SlotName, "pgoutput")); err != nil {
+	if err = t.execEx(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s NOEXPORT_SNAPSHOT", t.name, "pgoutput")); err != nil {
 		return
 	}
 	return
 }
 
-// 移除复制槽
+// DropReplication 移除复制槽
 func (t *ReplicationSyncer) DropReplication() error {
-	if err := t.execEx(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", t.option.SlotName)); err != nil {
-		return err
-	}
-	if err := t.execEx(fmt.Sprintf("drop publication if exists %s;", t.option.SlotName)); err != nil {
+	if err := t.execEx(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", t.name)); err != nil {
 		return err
 	}
 	return nil
+}
+
+// CreatePublication 移除复制槽
+func (t *ReplicationSyncer) CreatePublication(tables []string) error {
+	var tableString string
+	if tables == nil || len(tables) == 0 {
+		tableString = "ALL TABLES"
+	} else {
+		tableString = "TABLE " + strings.Join(tables, ",")
+	}
+	// 详见：select * from pg_catalog.pg_publication;
+	return t.execEx(fmt.Sprintf("CREATE PUBLICATION %s FOR %s", t.name, tableString))
+}
+
+// DropPublication 移除复制槽
+func (t *ReplicationSyncer) DropPublication() error {
+	if err := t.execEx(fmt.Sprintf("drop publication if exists %s;", t.name)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SetReplicaIdentity 配置表复制标识
+func (t *ReplicationSyncer) SetReplicaIdentity(tables []string, status ReplicaIdentity) (err error) {
+	for _, v := range tables {
+		if err = t.execEx(fmt.Sprintf("ALTER TABLE %s replica identity %s", v, status)); err != nil {
+			return
+		}
+	}
+	return
 }

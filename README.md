@@ -13,6 +13,7 @@ golang postgres replication logical slot analyse
 * [logical replication decoding](https://www.postgresql.org/docs/current/logicaldecoding-example.html)
 * [view-pg-replication-slots](https://www.postgresql.org/docs/14/view-pg-replication-slots.html)
 * [protocol-logicalrep-message-formats](https://www.postgresql.org/docs/current/protocol-logicalrep-message-formats.html)
+* [replica identity full](https://www.postgresql.org/message-id/20170619.121104.1777280213434338308.t-ishii%40sraoss.co.jp)
 
 ### run demo
 
@@ -31,22 +32,29 @@ var syncer *core.ReplicationSyncer
 
 func main() {
 	syncer = core.NewReplicationSyncer(
-		core.ReplicationOption{
-			SlotName: "test", //复制槽和发布流名称
-			ConnConfig: pgx.ConnConfig{
-				Host:     "192.168.4.157",
-				Port:     30433,
-				Database: "web",
-				User:     "postgres",
-				Password: "default",
-			},
-			Tables:                    []string{"sync*"}, //监听sync开头的所有表
-			TablesReplicaIdentityFull: []string{"sync"},  //需更改复制标识的表，开启后ReplicationMessage中的Columns为操作受影响的列
+		"test", //复制槽和发布流名称
+		pgx.ConnConfig{
+			Host:     "192.168.4.157",
+			Port:     30433,
+			Database: "web",
+			User:     "postgres",
+			Password: "default",
 		},
-		dmlHandler,
 	)
-	//syncer.DropReplication()
-	log.Fatalf("sync err: %v", syncer.Debug().Start(context.Background()))
+	syncer.Debug()
+	// 创建逻辑复制槽位
+	if err := syncer.CreateReplication(); err != nil {
+		log.Fatal(err)
+	}
+	// 创建发布流
+	if err := syncer.CreatePublication([]string{"sync", "test*"}); err != nil {
+		log.Fatal(err)
+	}
+	// 设置复制标识
+	if err := syncer.SetReplicaIdentity([]string{"sync", "test"}, core.ReplicaIdentityFull); err != nil {
+		log.Fatal(err)
+	}
+	log.Fatalf("sync err: %v", syncer.Start(context.Background(), dmlHandler))
 }
 
 func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
@@ -70,5 +78,6 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 	return core.DMLHandlerStatusSuccess //继续并记录此次游标
 	//return core.DMLHandlerStatusContinue //继续但不记录此次游标，多用于批量处理
 }
+
 
 ```
