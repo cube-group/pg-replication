@@ -5,7 +5,6 @@ import (
 	"github.com/cube-group/pg-replication/core"
 	"github.com/jackc/pgx"
 	"log"
-	"time"
 )
 
 var syncer *core.ReplicationSyncer
@@ -54,7 +53,6 @@ func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
 			)
 		}
 	}
-	time.Sleep(time.Second)
 	return core.DMLHandlerStatusSuccess //继续并记录此次游标
 	//return core.DMLHandlerStatusContinue //继续但不记录此次游标，多用于批量处理
 }

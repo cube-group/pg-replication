@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
@@ -33,6 +34,7 @@ type ReplicationSyncer struct {
 	_debug    bool
 	_conn     *pgx.ReplicationConn
 	_flushMsg []ReplicationMessage
+	_running  bool
 
 	name   string
 	config pgx.ConnConfig
@@ -74,6 +76,7 @@ func (t *ReplicationSyncer) conn() (*pgx.ReplicationConn, error) {
 }
 
 func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldRow []Tuple) (msg ReplicationMessage, err error) {
+	msg.RelationID = relation
 	msg.EventType = eventType
 	msg.SchemaName, msg.TableName = t.set.Assist(relation)
 	if row == nil && oldRow == nil {
@@ -118,7 +121,9 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage, dmlHandler Replicati
 	var m ReplicationMessage
 	switch v := msg.(type) {
 	case Relation:
-		t._flushMsg = make([]ReplicationMessage, 0)
+		if t._flushMsg == nil {
+			t._flushMsg = make([]ReplicationMessage, 0)
+		}
 		t.set.Add(v)
 	case Insert:
 		m, err = t.dump(EventType_INSERT, v.RelationID, v.Row, nil)
@@ -129,7 +134,7 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage, dmlHandler Replicati
 	case Truncate:
 		m, err = t.dump(EventType_TRUNCATE, v.RelationID, nil, nil)
 	case Commit:
-		if t._flushMsg != nil || len(t._flushMsg) > 0 {
+		if len(t._flushMsg) > 0 {
 			status := dmlHandler(t._flushMsg...)
 			t._flushMsg = nil
 			if status == DMLHandlerStatusSuccess {
@@ -140,10 +145,14 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage, dmlHandler Replicati
 	if err != nil {
 		return err
 	}
-	if m.SchemaName != "" {
+	if m.RelationID > 0 {
 		t._flushMsg = append(t._flushMsg, m)
 	}
 	return nil
+}
+
+func (t *ReplicationSyncer) Shutdown() {
+	t._running = false
 }
 
 func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDMLHandler) (err error) {
@@ -158,11 +167,15 @@ func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDML
 	if err = conn.StartReplication(t.name, 0, -1, pluginArguments...); err != nil {
 		return
 	}
+	t._running = true
 	// ready notify
 	dmlHandler(ReplicationMessage{EventType: EventType_READY})
 	// round read
 	waitTimeout := 10 * time.Second
 	for {
+		if !t._running {
+			return errors.New("syncer shutting down.")
+		}
 		var message *pgx.ReplicationMessage
 		wctx, cancel := context.WithTimeout(ctx, waitTimeout)
 		message, err = conn.WaitForReplicationMessage(wctx)

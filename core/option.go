@@ -11,6 +11,7 @@ const (
 )
 
 type ReplicationMessage struct {
+	RelationID uint32
 	EventType  EventType
 	SchemaName string
 	TableName  string
