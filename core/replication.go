@@ -2,8 +2,8 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"github.com/cube-group/pg-replication/pkg/utils"
 	"github.com/jackc/pgx"
 	"github.com/jackc/pgx/pgtype"
 	"log"
@@ -30,42 +30,30 @@ const (
 	ReplicaIdentityDefault ReplicaIdentity = "DEFAULT"
 )
 
-type ReplicationSyncer struct {
+type Replication struct {
 	_debug    bool
 	_conn     *pgx.ReplicationConn
 	_flushMsg []ReplicationMessage
-	_running  bool
 
 	name   string
 	config pgx.ConnConfig
 	set    *RelationSet
 }
 
-func NewReplicationSyncer(name string, config pgx.ConnConfig) *ReplicationSyncer {
+func NewReplication(name string, config pgx.ConnConfig) *Replication {
 	if !regexp.MustCompile(`[a-z0-9_]{3,64}`).MatchString(name) {
 		log.Fatal("name invalid")
 	}
-	return &ReplicationSyncer{name: name, config: config, set: NewRelationSet()}
+	return &Replication{name: name, config: config, set: NewRelationSet()}
 }
 
-func (t *ReplicationSyncer) Debug() *ReplicationSyncer {
+func (t *Replication) Debug() *Replication {
 	t._debug = true
 	return t
 }
 
-func (t *ReplicationSyncer) UnDebug() *ReplicationSyncer {
-	t._debug = false
-	return t
-}
-
-func (t *ReplicationSyncer) log(any ...interface{}) {
-	if t._debug {
-		log.Println(any...)
-	}
-}
-
-func (t *ReplicationSyncer) conn() (*pgx.ReplicationConn, error) {
-	if t._conn == nil {
+func (t *Replication) conn() (*pgx.ReplicationConn, error) {
+	if t._conn == nil || !t._conn.IsAlive() {
 		conn, err := pgx.ReplicationConnect(t.config)
 		if err != nil {
 			return nil, err
@@ -75,7 +63,8 @@ func (t *ReplicationSyncer) conn() (*pgx.ReplicationConn, error) {
 	return t._conn, nil
 }
 
-func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldRow []Tuple) (msg ReplicationMessage, err error) {
+// 组装ReplicationMessage
+func (t *Replication) dump(eventType EventType, relation uint32, row, oldRow []Tuple) (msg ReplicationMessage, err error) {
 	msg.RelationID = relation
 	msg.EventType = eventType
 	msg.SchemaName, msg.TableName = t.set.Assist(relation)
@@ -89,7 +78,10 @@ func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldR
 	}
 	if oldRow != nil {
 		if oldValues, er := t.set.Values(relation, oldRow); er == nil {
-			msg.Columns = t.dumpColumns(values, oldValues)
+			msg.Columns = t.dumpChangedColumns(values, oldValues)
+			if len(msg.Columns) == 0 { //没必要的update
+				return
+			}
 		}
 	}
 	body := make(map[string]interface{}, 0)
@@ -101,7 +93,7 @@ func (t *ReplicationSyncer) dump(eventType EventType, relation uint32, row, oldR
 	return
 }
 
-func (t *ReplicationSyncer) dumpColumns(values, oldValues map[string]pgtype.Value) (res []string) {
+func (t *Replication) dumpChangedColumns(values, oldValues map[string]pgtype.Value) (res []string) {
 	if oldValues == nil || values == nil {
 		return nil
 	}
@@ -113,13 +105,14 @@ func (t *ReplicationSyncer) dumpColumns(values, oldValues map[string]pgtype.Valu
 	return
 }
 
-func (t *ReplicationSyncer) handle(message *pgx.WalMessage, dmlHandler ReplicationDMLHandler) error {
+func (t *Replication) handle(message *pgx.WalMessage, dmlHandler ReplicationDMLHandler) error {
 	msg, err := Parse(message.WalData)
 	if err != nil {
 		return fmt.Errorf("invalid pgoutput message: %s", err)
 	}
 	var m ReplicationMessage
 	switch v := msg.(type) {
+	case Begin:
 	case Relation:
 		if t._flushMsg == nil {
 			t._flushMsg = make([]ReplicationMessage, 0)
@@ -134,48 +127,49 @@ func (t *ReplicationSyncer) handle(message *pgx.WalMessage, dmlHandler Replicati
 	case Truncate:
 		m, err = t.dump(EventType_TRUNCATE, v.RelationID, nil, nil)
 	case Commit:
-		if len(t._flushMsg) > 0 {
-			status := dmlHandler(t._flushMsg...)
-			t._flushMsg = nil
-			if status == DMLHandlerStatusSuccess {
-				err = t.sendStatusACK(message.WalStart)
-			}
+		t._flushMsg = append(t._flushMsg, ReplicationMessage{EventType: EventType_COMMIT, Lsn: message.WalStart})
+		status := dmlHandler(t._flushMsg...)
+		t._flushMsg = nil
+		if status == DMLHandlerStatusSuccess {
+			err = t.SendStatusACK(message.WalStart)
 		}
 	}
 	if err != nil {
 		return err
 	}
 	if m.RelationID > 0 {
+		m.Lsn = message.WalStart
 		t._flushMsg = append(t._flushMsg, m)
 	}
 	return nil
 }
 
-func (t *ReplicationSyncer) Shutdown() {
-	t._running = false
+func (t *Replication) Close() {
+	if t._conn != nil {
+		t._conn.Close()
+	}
 }
 
-func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDMLHandler) (err error) {
+func (t *Replication) Start(ctx context.Context, dmlHandler ReplicationDMLHandler) (err error) {
 	conn, err := t.conn()
+	if err != nil {
+		return
+	}
 	defer conn.Close()
 	// create replica identity|publication|replication
 	if err = t.CreateReplication(); err != nil {
-		return
+		return fmt.Errorf("CreateReplication %v", err)
 	}
 	// start replication slot
 	pluginArguments := t.pluginArgs("1", t.name)
 	if err = conn.StartReplication(t.name, 0, -1, pluginArguments...); err != nil {
-		return
+		return fmt.Errorf("StartReplication %v", err)
 	}
-	t._running = true
 	// ready notify
 	dmlHandler(ReplicationMessage{EventType: EventType_READY})
 	// round read
 	waitTimeout := 10 * time.Second
 	for {
-		if !t._running {
-			return errors.New("syncer shutting down.")
-		}
 		var message *pgx.ReplicationMessage
 		wctx, cancel := context.WithTimeout(ctx, waitTimeout)
 		message, err = conn.WaitForReplicationMessage(wctx)
@@ -184,7 +178,7 @@ func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDML
 			continue
 		}
 		if err != nil {
-			return fmt.Errorf("replication failed: %s", err)
+			return fmt.Errorf("WaitForReplicationMessage: %s", err)
 		}
 		if message.WalMessage != nil {
 			if err = t.handle(message.WalMessage, dmlHandler); err != nil {
@@ -195,8 +189,8 @@ func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDML
 		// 不向master发送reply可能会导致连接EOF
 		if message.ServerHeartbeat != nil {
 			if message.ServerHeartbeat.ReplyRequested == 1 {
-				if err = t.sendStatusACK(0); err != nil {
-					return err
+				if err = t.SendStatusACK(0); err != nil {
+					t.debug("replication", "ServerHeartbeat", err)
 				}
 			}
 		}
@@ -204,7 +198,7 @@ func (t *ReplicationSyncer) Start(ctx context.Context, dmlHandler ReplicationDML
 }
 
 // 执行sql忽略exist
-func (t *ReplicationSyncer) execEx(sql string) error {
+func (t *Replication) execEx(sql string) error {
 	conn, err := t.conn()
 	if err != nil {
 		return err
@@ -214,23 +208,24 @@ func (t *ReplicationSyncer) execEx(sql string) error {
 		// 42710 already exist
 		// 42704 no exist
 		if !ok || (pgErr.Code != "42710" && pgErr.Code != "42704") {
+			t.debug("exec.err:", sql, err)
 			return err
 		} else {
-			t.log("exec:", sql, "[silent]")
+			t.debug("exec:", sql, "[silent]")
 		}
 	} else {
-		t.log("exec:", sql)
+		t.debug("exec:", sql)
 	}
 	return nil
 }
 
 // 执行sql并获取结果
-func (t *ReplicationSyncer) result(sql string) (res []map[string]interface{}, err error) {
+func (t *Replication) result(sql string) (res []map[string]interface{}, err error) {
 	conn, err := t.conn()
 	if err != nil {
 		return
 	}
-	t.log("query:", sql)
+	t.debug("query:", sql)
 	rows, err := conn.Query(sql)
 	if err != nil {
 		return
@@ -252,25 +247,28 @@ func (t *ReplicationSyncer) result(sql string) (res []map[string]interface{}, er
 	return
 }
 
+// SendStatusACK
 // 向master发送lsn，即：WAL中使用者已经收到解码数据的最新位置
 // 详见：select * from pg_catalog.pg_replication_slots；结果中的confirmed_flush_lsn
-func (t *ReplicationSyncer) sendStatusACK(lsn uint64) error {
+func (t *Replication) SendStatusACK(lsn uint64) error {
 	conn, err := t.conn()
 	if err != nil {
 		return err
 	}
 	k, err := pgx.NewStandbyStatus(lsn)
 	if err != nil {
-		return fmt.Errorf("error creating standby status: %s", err)
+		return fmt.Errorf("error confirm lsn: %v %s", lsn, err)
 	}
-	if err = conn.SendStandbyStatus(k); err != nil {
-		return fmt.Errorf("failed to send standy status: %s", err)
+	if err = utils.Retry(fmt.Sprintf("confirm lsn %v", lsn), 10, time.Second, func() error {
+		return conn.SendStandbyStatus(k)
+	}); err != nil {
+		return err
 	}
-	t.log("sendStatus lsn:", lsn, pgx.FormatLSN(lsn))
+	t.debug("sendStatus lsn:", lsn, pgx.FormatLSN(lsn))
 	return nil
 }
 
-func (t *ReplicationSyncer) pluginArgs(version, publication string) []string {
+func (t *Replication) pluginArgs(version, publication string) []string {
 	//} else if outputPlugin == "wal2json" {
 	//	pluginArguments = []string{"\"pretty-print\" 'true'"}
 	//}
@@ -279,24 +277,18 @@ func (t *ReplicationSyncer) pluginArgs(version, publication string) []string {
 
 // CreateReplication 创建逻辑复制槽
 // 锁定起始lsn位置
-func (t *ReplicationSyncer) CreateReplication() (err error) {
+func (t *Replication) CreateReplication() (err error) {
 	// create publication
-	if err = t.execEx(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s NOEXPORT_SNAPSHOT", t.name, "pgoutput")); err != nil {
-		return
-	}
-	return
+	return t.execEx(fmt.Sprintf("CREATE_REPLICATION_SLOT %s LOGICAL %s NOEXPORT_SNAPSHOT", t.name, "pgoutput"))
 }
 
 // DropReplication 移除复制槽
-func (t *ReplicationSyncer) DropReplication() error {
-	if err := t.execEx(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", t.name)); err != nil {
-		return err
-	}
-	return nil
+func (t *Replication) DropReplication() error {
+	return t.execEx(fmt.Sprintf("SELECT pg_drop_replication_slot('%s');", t.name))
 }
 
 // CreatePublication 移除复制槽
-func (t *ReplicationSyncer) CreatePublication(tables []string) error {
+func (t *Replication) CreatePublication(tables []string) error {
 	var tableString string
 	if tables == nil || len(tables) == 0 {
 		tableString = "ALL TABLES"
@@ -308,7 +300,7 @@ func (t *ReplicationSyncer) CreatePublication(tables []string) error {
 }
 
 // DropPublication 移除复制槽
-func (t *ReplicationSyncer) DropPublication() error {
+func (t *Replication) DropPublication() error {
 	if err := t.execEx(fmt.Sprintf("drop publication if exists %s;", t.name)); err != nil {
 		return err
 	}
@@ -316,7 +308,7 @@ func (t *ReplicationSyncer) DropPublication() error {
 }
 
 // SetReplicaIdentity 配置表复制标识
-func (t *ReplicationSyncer) SetReplicaIdentity(tables []string, status ReplicaIdentity) (err error) {
+func (t *Replication) SetReplicaIdentity(tables []string, status ReplicaIdentity) (err error) {
 	for _, v := range tables {
 		if err = t.execEx(fmt.Sprintf("ALTER TABLE %s replica identity %s", v, status)); err != nil {
 			return

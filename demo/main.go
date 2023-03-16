@@ -7,11 +7,11 @@ import (
 	"log"
 )
 
-var syncer *core.ReplicationSyncer
+var replication *core.Replication
 
 func main() {
-	syncer = core.NewReplicationSyncer(
-		"test", //复制槽和发布流名称
+	replication = core.NewReplication(
+		"local", //复制槽和发布流名称
 		pgx.ConnConfig{
 			Host:     "192.168.4.157",
 			Port:     30433,
@@ -20,20 +20,19 @@ func main() {
 			Password: "default",
 		},
 	)
-	syncer.Debug()
 	// 创建逻辑复制槽位
-	if err := syncer.CreateReplication(); err != nil {
+	if err := replication.CreateReplication(); err != nil {
 		log.Fatal(err)
 	}
 	// 创建发布流
-	if err := syncer.CreatePublication([]string{"sync", "test*"}); err != nil {
+	if err := replication.CreatePublication([]string{"container", "image"}); err != nil {
 		log.Fatal(err)
 	}
 	// 设置复制标识
-	if err := syncer.SetReplicaIdentity([]string{"sync", "test"}, core.ReplicaIdentityFull); err != nil {
+	if err := replication.SetReplicaIdentity([]string{"container", "image"}, core.ReplicaIdentityFull); err != nil {
 		log.Fatal(err)
 	}
-	log.Fatalf("sync err: %v", syncer.Start(context.Background(), dmlHandler))
+	log.Fatalf("sync err: %v", replication.Debug().Start(context.Background(), dmlHandler))
 }
 
 func dmlHandler(msg ...core.ReplicationMessage) core.DMLHandlerStatus {
