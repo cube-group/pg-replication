@@ -8,9 +8,11 @@ const (
 	EventType_UPDATE   EventType = 2
 	EventType_DELETE   EventType = 3
 	EventType_TRUNCATE EventType = 4
+	EventType_COMMIT   EventType = 10
 )
 
 type ReplicationMessage struct {
+	Lsn        uint64
 	RelationID uint32
 	EventType  EventType
 	SchemaName string

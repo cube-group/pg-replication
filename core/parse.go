@@ -17,7 +17,6 @@ type decoder struct {
 func (d *decoder) bool() bool {
 	x := d.buf.Next(1)[0]
 	return x != 0
-
 }
 
 func (d *decoder) uint8() uint8 {
